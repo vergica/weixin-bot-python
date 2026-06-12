@@ -43,7 +43,7 @@ from weixin_bot.messaging.send_media import send_image, send_video, send_file
 from weixin_bot.media.mime import guess_media_type
 from weixin_bot.messaging.typing import get_config, send_typing, TYPING, CANCEL, TypingIndicator
 from weixin_bot.messaging.notices import send_error_notice
-from weixin_bot.config import get as config_get
+from weixin_bot.config import get as config_get, allow_list
 
 MEDIA_DIR = STATE_DIR / "media"
 
@@ -500,11 +500,16 @@ async def step_monitor(account_id: str, token: str, base_url: str) -> None:
                 base_url=base_url, token=token, context_token=ctx,
             )
 
+    allow = allow_list()
+    if allow:
+        print(f"  allow_from: {allow}")
+
     loop = MonitorLoop(
         base_url=base_url,
         token=token,
         account_id=account_id,
         on_message=handle_message,
+        allow_from=allow or None,
     )
 
     print(f"  Starting monitor for {account_id} ...")

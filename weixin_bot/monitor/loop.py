@@ -58,11 +58,13 @@ class MonitorLoop:
         account_id: str,
         state_dir: str | Path | None = None,
         on_message: Callable[[dict], Awaitable[None]],
+        allow_from: list[str] | None = None,
     ):
         self._base_url = base_url
         self._token = token
         self._account_id = account_id
         self._on_message = on_message
+        self._allow_from = set(allow_from or [])
         self._stop = asyncio.Event()
         self._current_task: asyncio.Task | None = None
         _dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
@@ -198,6 +200,26 @@ class MonitorLoop:
                 if from_user and ctx:
                     self.ctx_tokens.cache(from_user, ctx)
 
+                # 访问控制
+                if not self._is_allowed(from_user):
+                    logger.warning(
+                        "Access denied for %s (not in allow_from)", from_user
+                    )
+                    # 尝试发送提示消息 (如果有 context_token)
+                    if ctx:
+                        try:
+                            from weixin_bot.messaging.send import send_text as _send_text
+                            await _send_text(
+                                to=from_user,
+                                text="[Access Denied] You are not authorized. Contact the bot owner for access.",
+                                base_url=self._base_url,
+                                token=self._token,
+                                context_token=ctx,
+                            )
+                        except Exception:
+                            pass
+                    continue
+
                 try:
                     await self._on_message(msg)
                 except Exception:
@@ -248,6 +270,16 @@ class MonitorLoop:
             )
         except Exception:
             logger.warning("notifyStop failed (ignored)", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # access control
+    # ------------------------------------------------------------------
+
+    def _is_allowed(self, user_id: str) -> bool:
+        """检查用户是否在白名单中. 空白名单 = 全部允许."""
+        if not self._allow_from:
+            return True
+        return user_id in self._allow_from
 
     # ------------------------------------------------------------------
     # session pause (自愈)

@@ -18,6 +18,7 @@ _DEFAULTS = {
     "channel_version": "0.1.0",
     "timeout": 35,
     "bot_type": 3,
+    "allow_from": "",  # 逗号分隔的白名单, 空=全部允许
 }
 
 _ENV_MAP = {
@@ -26,6 +27,7 @@ _ENV_MAP = {
     "channel_version": "WEIXIN_BOT_CHANNEL_VERSION",
     "timeout": "WEIXIN_BOT_TIMEOUT",
     "bot_type": "WEIXIN_BOT_TYPE",
+    "allow_from": "WEIXIN_BOT_ALLOW_FROM",
 }
 
 
@@ -93,3 +95,14 @@ def get(key: str) -> str | int | bool:
 
     # 3. 默认值
     return _DEFAULTS.get(key, "")
+
+
+def allow_list() -> list[str]:
+    """读取 allow_from 白名单 (逗号分隔).
+
+    空列表 = 全部允许.
+    """
+    raw = str(get("allow_from")).strip()
+    if not raw:
+        return []
+    return [u.strip() for u in raw.split(",") if u.strip()]
