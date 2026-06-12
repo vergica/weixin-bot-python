@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 CHANNEL_VERSION = "0.1.0"
 
+# 轮询错误退避 — 对齐 nanobot monitor.ts
+MAX_CONSECUTIVE_FAILURES = 3
+BACKOFF_DELAY_S = 30
+RETRY_DELAY_S = 2
+
 
 class SessionExpired(Exception):
     """errcode == -14, token 已失效, 需重新登录."""
@@ -100,6 +105,7 @@ class MonitorLoop:
         await self._notify_start()
         buf = self._load_buf()
         timeout = 35.0
+        consecutive_failures = 0
 
         while not self._stop.is_set():
             # ---- 检查 session 暂停 ----
@@ -122,12 +128,20 @@ class MonitorLoop:
             except asyncio.CancelledError:
                 break
             except Exception:
-                logger.warning("getUpdates error, retry in 2s", exc_info=True)
-                await self._sleep(2)
+                consecutive_failures += 1
+                delay = BACKOFF_DELAY_S if consecutive_failures >= MAX_CONSECUTIVE_FAILURES else RETRY_DELAY_S
+                logger.warning(
+                    "getUpdates error (consecutive=%d), retry in %ds",
+                    consecutive_failures, delay, exc_info=True,
+                )
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    consecutive_failures = 0  # reset counter after backoff
+                await self._sleep(delay)
                 continue
 
             # 业务错误
             if resp.get("errcode") == -14:
+                consecutive_failures = 0  # 预期错误, 不计数
                 self._pause_session()
                 remaining = self._session_pause_remaining()
                 logger.warning(
@@ -137,13 +151,20 @@ class MonitorLoop:
                 continue
 
             if resp.get("ret", 0) != 0:
+                consecutive_failures += 1
+                delay = BACKOFF_DELAY_S if consecutive_failures >= MAX_CONSECUTIVE_FAILURES else RETRY_DELAY_S
                 logger.warning(
-                    "getUpdates ret=%d errcode=%s, retry in 2s",
-                    resp.get("ret"),
-                    resp.get("errcode"),
+                    "getUpdates ret=%d errcode=%s (consecutive=%d), retry in %ds",
+                    resp.get("ret"), resp.get("errcode"),
+                    consecutive_failures, delay,
                 )
-                await self._sleep(2)
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    consecutive_failures = 0
+                await self._sleep(delay)
                 continue
+
+            # 成功 — 重置计数器
+            consecutive_failures = 0
 
             # 成功
             buf = resp.get("get_updates_buf", buf)
