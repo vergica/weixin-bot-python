@@ -13,7 +13,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Awaitable
 
-from weixin_bot.api.client import api_post
+from weixin_bot.api.client import WeixinApiClient
 from weixin_bot.auth.accounts import STATE_DIR as DEFAULT_STATE_DIR
 from weixin_bot.messaging.context_token import ContextTokenCache
 
@@ -68,6 +68,8 @@ class MonitorLoop:
         self._session_pause_until: float = 0.0
         # 消息去重 — 最近 1000 条 message_id
         self._processed_ids: OrderedDict[str, None] = OrderedDict()
+        # 持久化 HTTP 客户端 — 连接复用
+        self._api: WeixinApiClient | None = None
 
     # ------------------------------------------------------------------
     # public
@@ -79,6 +81,22 @@ class MonitorLoop:
         errcode -14 暂停 1 小时后自动恢复, 不再抛 SessionExpired.
         stop() 会 cancel 飞行中的 HTTP 请求, 实现即时退出.
         """
+        # 创建持久化 HTTP 客户端 (连接复用)
+        self._api = WeixinApiClient(
+            base_url=self._base_url,
+            token=self._token,
+            timeout=45.0,  # 略大于最长轮询 timeout
+        )
+        await self._api.connect()
+
+        try:
+            await self._run_loop()
+        finally:
+            await self._api.close()
+            self._api = None
+
+    async def _run_loop(self) -> None:
+        """实际轮询循环 — 在 run() 内被调用, 持有复用的 WeixinApiClient."""
         await self._notify_start()
         buf = self._load_buf()
         timeout = 35.0
@@ -177,37 +195,34 @@ class MonitorLoop:
     # ------------------------------------------------------------------
 
     async def _get_updates(self, buf: str, timeout: float) -> dict:
-        raw = await api_post(
-            base_url=self._base_url,
+        assert self._api is not None
+        raw = await self._api.post(
             endpoint="ilink/bot/getupdates",
-            body=json.dumps({
+            body={
                 "get_updates_buf": buf,
                 "base_info": {"channel_version": CHANNEL_VERSION},
-            }),
-            token=self._token,
+            },
             timeout=timeout,
         )
         return json.loads(raw)
 
     async def _notify_start(self) -> None:
+        assert self._api is not None
         try:
-            await api_post(
-                base_url=self._base_url,
+            await self._api.post(
                 endpoint="ilink/bot/msg/notifystart",
-                body=json.dumps({"base_info": {"channel_version": CHANNEL_VERSION}}),
-                token=self._token,
+                body={"base_info": {"channel_version": CHANNEL_VERSION}},
                 timeout=10.0,
             )
         except Exception:
             logger.warning("notifyStart failed (ignored)", exc_info=True)
 
     async def _notify_stop(self) -> None:
+        assert self._api is not None
         try:
-            await api_post(
-                base_url=self._base_url,
+            await self._api.post(
                 endpoint="ilink/bot/msg/notifystop",
-                body=json.dumps({"base_info": {"channel_version": CHANNEL_VERSION}}),
-                token=self._token,
+                body={"base_info": {"channel_version": CHANNEL_VERSION}},
                 timeout=10.0,
             )
         except Exception:
