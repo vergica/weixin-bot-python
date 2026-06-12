@@ -51,16 +51,34 @@ def _parse_aes_key(aes_key: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# URL
+# URL — 降级重试
 # ---------------------------------------------------------------------------
 
-def _build_url(cdn: CdnRef, cdn_base: str) -> str:
-    """确定下载 URL. 优先 full_url, 其次用 encrypt_query_param 拼接."""
+def _build_candidates(cdn: CdnRef, cdn_base: str) -> list[tuple[str, str]]:
+    """构建下载 URL 候选列表 [(label, url), ...].
+
+    优先 full_url, 其次 encrypt_query_param. 两条都可能是空.
+    """
+    candidates: list[tuple[str, str]] = []
     if cdn.full_url:
-        return cdn.full_url
+        candidates.append(("full_url", cdn.full_url))
     if cdn.encrypt_query_param:
-        return f"{cdn_base}/download?encrypted_query_param={quote(cdn.encrypt_query_param)}"
-    raise ValueError("CdnRef 必须提供 full_url 或 encrypt_query_param")
+        param_url = f"{cdn_base}/download?encrypted_query_param={quote(cdn.encrypt_query_param)}"
+        if not cdn.full_url or param_url != cdn.full_url:
+            candidates.append(("encrypt_query_param", param_url))
+    if not candidates:
+        raise ValueError("CdnRef 必须提供 full_url 或 encrypt_query_param")
+    return candidates
+
+
+def _is_retryable_download_error(err: Exception) -> bool:
+    """判断下载错误是否可重试 (5xx / 超时 / 传输错误)."""
+    if isinstance(err, httpx.TimeoutException | httpx.TransportError):
+        return True
+    if isinstance(err, httpx.HTTPStatusError):
+        status_code = err.response.status_code if err.response is not None else 0
+        return status_code >= 500
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -74,16 +92,38 @@ async def download_media(
 ) -> bytes:
     """从微信 CDN 下载媒体文件并 AES 解密, 返回明文 bytes.
 
+    下载策略:
+    1. 优先 full_url
+    2. full_url 失败 (5xx/超时/传输错误) → 降级到 encrypt_query_param
+    3. 4xx 等客户端错误不降级, 直接失败
+
     对图片/文件/视频都需要解密, 语音需要转码 (sil→wav, 暂未实现).
     """
-    url = _build_url(cdn, cdn_base)
-    logger.info("Downloading CDN media: %s...", url[:80])
+    candidates = _build_candidates(cdn, cdn_base)
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        encrypted = resp.content
+        data = b""
+        for i, (source, cdn_url) in enumerate(candidates):
+            try:
+                logger.info("Downloading CDN media via %s: %s...", source, cdn_url[:80])
+                resp = await client.get(cdn_url)
+                resp.raise_for_status()
+                data = resp.content
+                break
+            except Exception as e:
+                has_next = i + 1 < len(candidates)
+                should_fallback = (
+                    source == "full_url"
+                    and has_next
+                    and _is_retryable_download_error(e)
+                )
+                if should_fallback:
+                    logger.warning(
+                        "CDN download failed via full_url, falling back to encrypt_query_param: %s", e
+                    )
+                    continue
+                raise
 
-    logger.debug("Downloaded %d bytes, decrypting...", len(encrypted))
+    logger.debug("Downloaded %d bytes, decrypting...", len(data))
     key = _parse_aes_key(cdn.aes_key)
-    return aes_decrypt(encrypted, key)
+    return aes_decrypt(data, key)
