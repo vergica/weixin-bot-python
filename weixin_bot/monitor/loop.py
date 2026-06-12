@@ -1,0 +1,193 @@
+"""长轮询引擎 — getUpdates 循环, 负责拉消息.
+
+对应原版 monitor/monitor.ts, 去掉 OpenClaw 框架耦合.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from pathlib import Path
+from typing import Callable, Awaitable
+
+from weixin_bot.api.client import api_post
+from weixin_bot.auth.accounts import STATE_DIR as DEFAULT_STATE_DIR
+
+logger = logging.getLogger(__name__)
+
+CHANNEL_VERSION = "0.1.0"
+
+
+class SessionExpired(Exception):
+    """errcode == -14, token 已失效, 需重新登录."""
+
+
+class MonitorLoop:
+    """getUpdates 长轮询循环.
+
+    Usage:
+        loop = MonitorLoop(
+            base_url="https://...",
+            token="...",
+            account_id="my-bot",
+            on_message=handle_message,
+        )
+        asyncio.create_task(loop.run())
+        # ... later ...
+        await loop.stop()
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        account_id: str,
+        state_dir: str | Path | None = None,
+        on_message: Callable[[dict], Awaitable[None]],
+    ):
+        self._base_url = base_url
+        self._token = token
+        self._account_id = account_id
+        self._on_message = on_message
+        self._stop = asyncio.Event()
+        self._current_task: asyncio.Task | None = None
+        _dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
+        self._sync_path = _dir / "accounts" / f"{account_id}.sync.json"
+
+    # ------------------------------------------------------------------
+    # public
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """启动长轮询. 阻塞直到 stop() 被调用或 SessionExpired.
+
+        stop() 会 cancel 飞行中的 HTTP 请求, 实现即时退出.
+        """
+        await self._notify_start()
+        buf = self._load_buf()
+        timeout = 35.0
+
+        while not self._stop.is_set():
+            self._current_task = asyncio.create_task(
+                self._get_updates(buf, timeout)
+            )
+            try:
+                resp = await self._current_task
+                self._current_task = None
+            except asyncio.CancelledError:
+                break
+            except SessionExpired:
+                raise
+            except Exception:
+                logger.warning("getUpdates error, retry in 2s", exc_info=True)
+                await self._sleep(2)
+                continue
+
+            # 业务错误
+            if resp.get("errcode") == -14:
+                raise SessionExpired(self._account_id)
+
+            if resp.get("ret", 0) != 0:
+                logger.warning(
+                    "getUpdates ret=%d errcode=%s, retry in 2s",
+                    resp.get("ret"),
+                    resp.get("errcode"),
+                )
+                await self._sleep(2)
+                continue
+
+            # 成功
+            buf = resp.get("get_updates_buf", buf)
+            self._save_buf(buf)
+
+            if "longpolling_timeout_ms" in resp:
+                timeout = resp["longpolling_timeout_ms"] / 1000
+
+            for msg in resp.get("msgs", []) or []:
+                try:
+                    await self._on_message(msg)
+                except Exception:
+                    logger.exception("on_message failed")
+
+        await self._notify_stop()
+
+    async def stop(self) -> None:
+        """发送停止信号并 cancel 飞行中的 getUpdates 请求, 即时退出."""
+        self._stop.set()
+        if self._current_task and not self._current_task.done():
+            self._current_task.cancel()
+
+    # ------------------------------------------------------------------
+    # internal
+    # ------------------------------------------------------------------
+
+    async def _get_updates(self, buf: str, timeout: float) -> dict:
+        raw = await api_post(
+            base_url=self._base_url,
+            endpoint="ilink/bot/getupdates",
+            body=json.dumps({
+                "get_updates_buf": buf,
+                "base_info": {"channel_version": CHANNEL_VERSION},
+            }),
+            token=self._token,
+            timeout=timeout,
+        )
+        return json.loads(raw)
+
+    async def _notify_start(self) -> None:
+        try:
+            await api_post(
+                base_url=self._base_url,
+                endpoint="ilink/bot/msg/notifystart",
+                body=json.dumps({"base_info": {"channel_version": CHANNEL_VERSION}}),
+                token=self._token,
+                timeout=10.0,
+            )
+        except Exception:
+            logger.warning("notifyStart failed (ignored)", exc_info=True)
+
+    async def _notify_stop(self) -> None:
+        try:
+            await api_post(
+                base_url=self._base_url,
+                endpoint="ilink/bot/msg/notifystop",
+                body=json.dumps({"base_info": {"channel_version": CHANNEL_VERSION}}),
+                token=self._token,
+                timeout=10.0,
+            )
+        except Exception:
+            logger.warning("notifyStop failed (ignored)", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # sync buf
+    # ------------------------------------------------------------------
+
+    def _load_buf(self) -> str:
+        try:
+            if self._sync_path.exists():
+                data = json.loads(self._sync_path.read_text("utf-8"))
+                buf = data.get("get_updates_buf", "")
+                logger.info("Loaded sync buf (%d chars)", len(buf))
+                return buf
+        except Exception:
+            logger.warning("Failed to load sync buf", exc_info=True)
+        return ""
+
+    def _save_buf(self, buf: str) -> None:
+        try:
+            self._sync_path.parent.mkdir(parents=True, exist_ok=True)
+            self._sync_path.write_text(
+                json.dumps({"get_updates_buf": buf}, ensure_ascii=False),
+                "utf-8",
+            )
+        except Exception:
+            logger.warning("Failed to save sync buf", exc_info=True)
+
+    async def _sleep(self, seconds: float) -> None:
+        """可中断的 sleep — stop() 时立刻醒来."""
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass

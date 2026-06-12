@@ -1,0 +1,17 @@
+[project]
+name = "weixin-bot"
+version = "0.1.0"
+description = "Standalone Python WeChat iLink bot — no framework dependencies"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "httpx>=0.28",
+    "cryptography>=44",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["weixin_bot"]

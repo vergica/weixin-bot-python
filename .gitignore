@@ -1,0 +1,6 @@
+.venv/
+.weixin-bot/
+__pycache__/
+*.pyc
+*.egg-info/
+.vscode/
