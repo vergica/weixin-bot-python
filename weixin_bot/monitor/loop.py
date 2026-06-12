@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -65,6 +66,8 @@ class MonitorLoop:
         self.ctx_tokens = ContextTokenCache()
         # Session paused state (自愈: errcode -14 后暂停 1h 再恢复)
         self._session_pause_until: float = 0.0
+        # 消息去重 — 最近 1000 条 message_id
+        self._processed_ids: OrderedDict[str, None] = OrderedDict()
 
     # ------------------------------------------------------------------
     # public
@@ -132,6 +135,24 @@ class MonitorLoop:
                 timeout = resp["longpolling_timeout_ms"] / 1000
 
             for msg in resp.get("msgs", []) or []:
+                # 跳过 bot 自己的消息
+                if msg.get("message_type") == 2:
+                    continue
+
+                # 消息去重
+                msg_id = str(msg.get("message_id", "") or "")
+                if not msg_id:
+                    msg_id = f"{msg.get('from_user_id', '')}_{msg.get('create_time_ms', '')}"
+                if not msg_id.strip("_"):
+                    continue  # 无法生成 ID, 跳过
+                if msg_id in self._processed_ids:
+                    logger.debug("Duplicate message %s, skipping", msg_id)
+                    continue
+                self._processed_ids[msg_id] = None
+                # 限制内存: 最多保留 1000 条
+                while len(self._processed_ids) > 1000:
+                    self._processed_ids.popitem(last=False)
+
                 # 缓存 context_token (后续发送前可自动刷新)
                 from_user = msg.get("from_user_id", "") or ""
                 ctx = msg.get("context_token", "") or ""
