@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import base64
 from typing import Optional
 
 from weixin_bot.api.client import api_post
+
+logger = logging.getLogger(__name__)
 
 CHANNEL_VERSION = "0.1.0"
 
@@ -26,6 +29,19 @@ def _gen_client_id() -> str:
     return "weixin-bot-" + base64.b32encode(raw).decode().rstrip("=").lower()
 
 
+def _check_response(raw: str, endpoint: str) -> dict:
+    """解析 API 响应, 检查 ret/errcode, 失败时 raise RuntimeError."""
+    data = json.loads(raw)
+    ret = data.get("ret", 0)
+    errcode = data.get("errcode", 0)
+    if (ret is not None and ret != 0) or (errcode is not None and errcode != 0):
+        msg = data.get("errmsg", "")
+        raise RuntimeError(
+            f"{endpoint} error ret={ret} errcode={errcode}{': ' + msg if msg else ''}"
+        )
+    return data
+
+
 async def send_text(
     *,
     to: str,
@@ -34,7 +50,10 @@ async def send_text(
     token: str,
     context_token: str = "",
 ) -> dict:
-    """发送纯文本消息, 返回 {'messageId': ...}."""
+    """发送纯文本消息, 返回 {'messageId': ...}.
+
+    Raises RuntimeError if the API returns an error.
+    """
     client_id = _gen_client_id()
 
     body = {
@@ -52,11 +71,12 @@ async def send_text(
         "base_info": {"channel_version": CHANNEL_VERSION},
     }
 
-    await api_post(
+    raw = await api_post(
         base_url=base_url,
         endpoint="ilink/bot/sendmessage",
         body=json.dumps(body, ensure_ascii=False),
         token=token,
         timeout=15.0,
     )
+    _check_response(raw, "sendmessage")
     return {"messageId": client_id}

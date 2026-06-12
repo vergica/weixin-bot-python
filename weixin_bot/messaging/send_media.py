@@ -11,6 +11,7 @@ import logging
 
 from weixin_bot.api.client import api_post
 from weixin_bot.cdn.upload import UploadedFileInfo
+from weixin_bot.messaging.send import _check_response
 
 logger = logging.getLogger(__name__)
 
@@ -72,13 +73,14 @@ async def _send_media_items(
             },
             "base_info": {"channel_version": CHANNEL_VERSION},
         }
-        await api_post(
+        raw = await api_post(
             base_url=base_url,
             endpoint="ilink/bot/sendmessage",
             body=json.dumps(body, ensure_ascii=False),
             token=token,
             timeout=15.0,
         )
+        _check_response(raw, "sendmessage")
 
     return {"messageId": last_client_id}
 
