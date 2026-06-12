@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Callable, Awaitable
 
@@ -22,6 +23,10 @@ CHANNEL_VERSION = "0.1.0"
 
 class SessionExpired(Exception):
     """errcode == -14, token 已失效, 需重新登录."""
+
+
+# session 暂停时长 (秒) — 对齐 nanobot SESSION_PAUSE_DURATION_S
+SESSION_PAUSE_DURATION_S = 60 * 60  # 1 小时
 
 
 class MonitorLoop:
@@ -58,14 +63,17 @@ class MonitorLoop:
         self._sync_path = _dir / "accounts" / f"{account_id}.sync.json"
         # context_token 缓存 — 自动在接收时缓存, 发送前过期刷新
         self.ctx_tokens = ContextTokenCache()
+        # Session paused state (自愈: errcode -14 后暂停 1h 再恢复)
+        self._session_pause_until: float = 0.0
 
     # ------------------------------------------------------------------
     # public
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """启动长轮询. 阻塞直到 stop() 被调用或 SessionExpired.
+        """启动长轮询. 阻塞直到 stop() 被调用.
 
+        errcode -14 暂停 1 小时后自动恢复, 不再抛 SessionExpired.
         stop() 会 cancel 飞行中的 HTTP 请求, 实现即时退出.
         """
         await self._notify_start()
@@ -73,6 +81,17 @@ class MonitorLoop:
         timeout = 35.0
 
         while not self._stop.is_set():
+            # ---- 检查 session 暂停 ----
+            remaining = self._session_pause_remaining()
+            if remaining > 0:
+                mins = max((remaining + 59) // 60, 1)
+                logger.warning(
+                    "Session paused — %d min remaining (errcode -14)", mins
+                )
+                await self._sleep(remaining)
+                if self._stop.is_set():
+                    break
+
             self._current_task = asyncio.create_task(
                 self._get_updates(buf, timeout)
             )
@@ -81,8 +100,6 @@ class MonitorLoop:
                 self._current_task = None
             except asyncio.CancelledError:
                 break
-            except SessionExpired:
-                raise
             except Exception:
                 logger.warning("getUpdates error, retry in 2s", exc_info=True)
                 await self._sleep(2)
@@ -90,7 +107,13 @@ class MonitorLoop:
 
             # 业务错误
             if resp.get("errcode") == -14:
-                raise SessionExpired(self._account_id)
+                self._pause_session()
+                remaining = self._session_pause_remaining()
+                logger.warning(
+                    "Session expired (errcode -14). Pausing %d min.",
+                    max((remaining + 59) // 60, 1),
+                )
+                continue
 
             if resp.get("ret", 0) != 0:
                 logger.warning(
@@ -168,6 +191,22 @@ class MonitorLoop:
             )
         except Exception:
             logger.warning("notifyStop failed (ignored)", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # session pause (自愈)
+    # ------------------------------------------------------------------
+
+    def _pause_session(self) -> None:
+        """暂停轮询 (errcode -14 时调用)."""
+        self._session_pause_until = time.time() + SESSION_PAUSE_DURATION_S
+
+    def _session_pause_remaining(self) -> int:
+        """返回暂停剩余秒数 (0 表示无暂停)."""
+        remaining = int(self._session_pause_until - time.time())
+        if remaining <= 0:
+            self._session_pause_until = 0.0
+            return 0
+        return remaining
 
     # ------------------------------------------------------------------
     # sync buf
