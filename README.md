@@ -46,6 +46,12 @@ timeout: 35
 
 # Bot type (3 = enterprise bot)
 bot_type: 3
+
+# Access control — comma-separated user IDs (empty = allow all)
+allow_from: ""
+
+# SKRouteTag header for IDC routing (empty = not sent)
+route_tag: ""
 ```
 
 Or via environment variables:
@@ -53,6 +59,8 @@ Or via environment variables:
 ```bash
 export WEIXIN_BOT_BASE_URL="https://ilinkai.weixin.qq.com"
 export WEIXIN_BOT_CDN_BASE_URL="https://novac2c.cdn.weixin.qq.com/c2c"
+export WEIXIN_BOT_ALLOW_FROM="user1@im.wechat,user2@im.wechat"
+export WEIXIN_BOT_ROUTE_TAG="my-dc"
 ```
 
 Priority: **env var > config.yaml > default**.
@@ -70,6 +78,8 @@ While the monitor is running, send these to the bot on WeChat:
 
 ## API Usage
 
+### Basic Echo Bot
+
 ```python
 import asyncio
 from weixin_bot.auth.login import login
@@ -84,11 +94,17 @@ async def main():
     # Monitor loop
     async def handle(msg: dict):
         m = parse_message(msg)
+        # Use loop.ctx_tokens to get a fresh context_token
+        ctx = await loop.ctx_tokens.get(
+            user_id=m.from_user, base_url=result["base_url"],
+            auth_token=result["bot_token"],
+        ) or m.context_token
+
         await send_text(
             to=m.from_user, text=f"Echo: {m.text}",
             base_url=result["base_url"],
             token=result["bot_token"],
-            context_token=m.context_token,
+            context_token=ctx,
         )
 
     loop = MonitorLoop(
@@ -122,23 +138,43 @@ await send_image(
 )
 ```
 
-### Typing Indicator
+### Typing Indicator (with automatic keepalive)
+
+```python
+from weixin_bot.messaging.typing import TypingIndicator
+
+async with TypingIndicator(
+    base_url=..., token=...,
+    ilink_user_id="user@im.wechat",
+    context_token=...,
+):
+    # Agent processes the message, generates a reply
+    # Typing indicator stays on with 5s keepalive
+    await send_text(...)
+# Auto-sends CANCEL on exit
+```
+
+For manual control, use the low-level API:
 
 ```python
 from weixin_bot.messaging.typing import get_config, send_typing, TYPING, CANCEL
 
-cfg = await get_config(
-    base_url=..., token=...,
-    ilink_user_id="user@im.wechat",
-)
-await send_typing(
-    base_url=..., token=...,
-    ilink_user_id="user@im.wechat",
-    typing_ticket=cfg["typing_ticket"],
-    status=TYPING,  # show "typing..."
-)
+cfg = await get_config(base_url=..., token=..., ilink_user_id="user@im.wechat")
+await send_typing(base_url=..., token=..., typing_ticket=cfg["typing_ticket"], status=TYPING)
 # ... generate reply ...
 await send_typing(..., status=CANCEL)
+```
+
+### Persistent HTTP Client
+
+For high-frequency scenarios, reuse a single connection:
+
+```python
+from weixin_bot.api.client import WeixinApiClient
+
+async with WeixinApiClient(base_url="https://...", token="...") as client:
+    raw = await client.post("ilink/bot/sendmessage", body={...})
+    data = await client.post_json("ilink/bot/getconfig", body=json_str)
 ```
 
 ### Markdown Filter
@@ -150,24 +186,42 @@ clean = filter_markdown("**bold** *中文斜体* ![img](url)")
 # → "**bold** 中文斜体 "
 ```
 
+## Reliability Features
+
+weixin-bot includes production-ready reliability mechanisms, aligned with the nanobot reference implementation:
+
+| Feature | Description |
+|---|---|
+| context_token auto-refresh | Cached tokens are refreshed via getconfig if >60s old, preventing silent message loss during long agent turns |
+| Response error checking | All send functions validate API `ret`/`errcode` and raise `RuntimeError` on failure |
+| Session auto-recovery | `errcode -14` pauses polling for 1h then resumes automatically — no manual restart needed |
+| Message deduplication | Last 1000 message IDs tracked to prevent duplicate processing from network retransmits |
+| Connection reuse | Persistent `httpx.AsyncClient` with connection pooling for the polling loop |
+| Long message splitting | Messages >4000 chars are automatically split into multiple chunks |
+| Exponential backoff | Consecutive polling failures escalate from 2s → 30s delay |
+| Media download fallback | `full_url` failures (5xx/timeout) gracefully fall back to `encrypt_query_param` |
+| Typing keepalive | `TypingIndicator` context manager keeps the typing indicator alive during agent processing |
+| Access control | Optional `allow_from` whitelist restricts who can interact with the bot |
+
 ## Module Structure
 
 ```
 weixin_bot/
-  api/client.py           # HTTP client (api_post, api_get)
+  api/client.py           # HTTP client (WeixinApiClient + api_post/api_get)
   auth/accounts.py        # Token storage (JSON files)
   auth/login.py           # QR code login flow
   cdn/crypto.py           # AES-128-ECB encrypt/decrypt
   cdn/upload.py           # File → encrypt → CDN upload
-  media/download.py       # CDN download → decrypt
+  media/download.py       # CDN download → decrypt (with fallback retry)
   media/mime.py           # MIME type detection
   messaging/inbound.py    # Parse inbound messages (text/image/voice/file/video + ref_msg)
-  messaging/send.py       # Send text messages
+  messaging/send.py       # Send text messages (auto-split long messages)
   messaging/send_media.py # Send image/video/file
-  messaging/typing.py     # sendTyping + getConfig
+  messaging/typing.py     # sendTyping + getConfig + TypingIndicator keepalive
+  messaging/context_token.py # context_token cache with auto-refresh
   messaging/markdown.py   # Markdown filter (CJK-aware)
   messaging/notices.py    # Error notification to users
-  monitor/loop.py         # Long-poll getUpdates engine
+  monitor/loop.py         # Long-poll engine (dedup, backoff, session auto-recovery)
   config.py               # config.yaml + env var loader
   __main__.py             # Interactive test entry point
 ```

@@ -46,6 +46,12 @@ timeout: 35
 
 # 机器人类型（3 = 企业机器人）
 bot_type: 3
+
+# 访问控制白名单 — 逗号分隔的用户 ID（空 = 全部允许）
+allow_from: ""
+
+# SKRouteTag 请求头（IDC 路由用，空 = 不发送）
+route_tag: ""
 ```
 
 或通过环境变量：
@@ -53,6 +59,8 @@ bot_type: 3
 ```bash
 export WEIXIN_BOT_BASE_URL="https://ilinkai.weixin.qq.com"
 export WEIXIN_BOT_CDN_BASE_URL="https://novac2c.cdn.weixin.qq.com/c2c"
+export WEIXIN_BOT_ALLOW_FROM="user1@im.wechat,user2@im.wechat"
+export WEIXIN_BOT_ROUTE_TAG="my-dc"
 ```
 
 优先级：**环境变量 > config.yaml > 默认值**。
@@ -70,6 +78,8 @@ export WEIXIN_BOT_CDN_BASE_URL="https://novac2c.cdn.weixin.qq.com/c2c"
 
 ## API 用法
 
+### 基础 Echo 机器人
+
 ```python
 import asyncio
 from weixin_bot.auth.login import login
@@ -84,11 +94,17 @@ async def main():
     # 监控循环
     async def handle(msg: dict):
         m = parse_message(msg)
+        # 使用 loop.ctx_tokens 获取已自动刷新的 context_token
+        ctx = await loop.ctx_tokens.get(
+            user_id=m.from_user, base_url=result["base_url"],
+            auth_token=result["bot_token"],
+        ) or m.context_token
+
         await send_text(
             to=m.from_user, text=f"Echo: {m.text}",
             base_url=result["base_url"],
             token=result["bot_token"],
-            context_token=m.context_token,
+            context_token=ctx,
         )
 
     loop = MonitorLoop(
@@ -122,23 +138,43 @@ await send_image(
 )
 ```
 
-### 打字指示器
+### 打字指示器（自动 keepalive）
+
+```python
+from weixin_bot.messaging.typing import TypingIndicator
+
+async with TypingIndicator(
+    base_url=..., token=...,
+    ilink_user_id="user@im.wechat",
+    context_token=...,
+):
+    # Agent 处理消息、生成回复
+    # 打字指示器每 5 秒自动续期
+    await send_text(...)
+# 退出时自动发送 CANCEL
+```
+
+手动控制（底层 API）：
 
 ```python
 from weixin_bot.messaging.typing import get_config, send_typing, TYPING, CANCEL
 
-cfg = await get_config(
-    base_url=..., token=...,
-    ilink_user_id="user@im.wechat",
-)
-await send_typing(
-    base_url=..., token=...,
-    ilink_user_id="user@im.wechat",
-    typing_ticket=cfg["typing_ticket"],
-    status=TYPING,  # 显示"对方正在输入…"
-)
+cfg = await get_config(base_url=..., token=..., ilink_user_id="user@im.wechat")
+await send_typing(base_url=..., token=..., typing_ticket=cfg["typing_ticket"], status=TYPING)
 # ... 生成回复 ...
 await send_typing(..., status=CANCEL)
+```
+
+### 持久化 HTTP 客户端
+
+高频请求场景下复用连接池：
+
+```python
+from weixin_bot.api.client import WeixinApiClient
+
+async with WeixinApiClient(base_url="https://...", token="...") as client:
+    raw = await client.post("ilink/bot/sendmessage", body={...})
+    data = await client.post_json("ilink/bot/getconfig", body=json_str)
 ```
 
 ### Markdown 过滤
@@ -150,24 +186,42 @@ clean = filter_markdown("**粗体** *中文斜体* ![图片](url)")
 # → "**粗体** 中文斜体 "
 ```
 
+## 可靠性机制
+
+参考 nanobot 实现，weixin-bot 内置生产级可靠性保障：
+
+| 机制 | 说明 |
+|---|---|
+| context_token 自动刷新 | 缓存的 token 超过 60 秒自动通过 getconfig 刷新，防止 agent 长时间处理导致回复静默丢失 |
+| 响应错误检查 | 所有 send 函数校验 API 返回的 `ret`/`errcode`，失败时抛出 `RuntimeError` |
+| Session 自动恢复 | `errcode -14` 暂停轮询 1 小时后自动恢复，无需手动重启 |
+| 消息去重 | 维护最近 1000 条 message_id，网络重推时自动跳过 |
+| 连接复用 | 持久化 `httpx.AsyncClient` 连接池，避免每次请求重新握手 |
+| 长消息拆分 | 超过 4000 字自动分段发送 |
+| 退避重试 | 连续失败 ≥3 次退避到 30s，否则 2s 重试 |
+| 媒体下载降级 | `full_url` 失败（5xx/超时）自动降级到 `encrypt_query_param` |
+| 打字 keepalive | `TypingIndicator` 上下文管理器在 agent 处理期间保持"对方正在输入…"状态 |
+| 访问控制 | 可选 `allow_from` 白名单限制可交互用户 |
+
 ## 模块结构
 
 ```
 weixin_bot/
-  api/client.py           # HTTP 客户端（api_post、api_get）
+  api/client.py           # HTTP 客户端（WeixinApiClient + api_post/api_get）
   auth/accounts.py        # 凭据存储（JSON 文件）
   auth/login.py           # 二维码登录流程
   cdn/crypto.py           # AES-128-ECB 加解密
   cdn/upload.py           # 文件 → 加密 → CDN 上传
-  media/download.py       # CDN 下载 → 解密
+  media/download.py       # CDN 下载 → 解密（含降级重试）
   media/mime.py           # MIME 类型检测
   messaging/inbound.py    # 入站消息解析（文本/图片/语音/文件/视频 + 引用）
-  messaging/send.py       # 发送文本消息
+  messaging/send.py       # 发送文本消息（长消息自动拆分）
   messaging/send_media.py # 发送图片/视频/文件
-  messaging/typing.py     # 打字指示器（sendTyping + getConfig）
+  messaging/typing.py     # sendTyping + getConfig + TypingIndicator keepalive
+  messaging/context_token.py # context_token 缓存 + 自动刷新
   messaging/markdown.py   # Markdown 过滤器（支持 CJK 判断）
   messaging/notices.py    # 错误通知回传用户
-  monitor/loop.py         # 长轮询引擎（getUpdates）
+  monitor/loop.py         # 长轮询引擎（去重、退避、session 自动恢复）
   config.py               # 配置加载（config.yaml + 环境变量）
   __main__.py             # 交互测试入口
 ```
