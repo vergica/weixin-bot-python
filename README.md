@@ -10,7 +10,7 @@ Based on the [Tencent openclaw-weixin](https://github.com/Tencent/openclaw-weixi
 
 ```bash
 # Install
-git clone <repo-url> && cd weixin-bot
+git clone https://github.com/vergica/weixin-bot-python.git && cd weixin-bot
 uv sync
 uv run python -m weixin_bot
 ```
