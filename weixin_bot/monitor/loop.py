@@ -89,10 +89,13 @@ class MonitorLoop:
         stop() 会 cancel 飞行中的 HTTP 请求, 实现即时退出.
         """
         # 创建持久化 HTTP 客户端 (连接复用)
+        from weixin_bot.config import get as _config_get
+        route_tag = str(_config_get("route_tag") or "").strip()
         self._api = WeixinApiClient(
             base_url=self._base_url,
             token=self._token,
             timeout=45.0,  # 略大于最长轮询 timeout
+            route_tag=route_tag,
         )
         await self._api.connect()
 

@@ -28,6 +28,7 @@ _ENV_MAP = {
     "timeout": "WEIXIN_BOT_TIMEOUT",
     "bot_type": "WEIXIN_BOT_TYPE",
     "allow_from": "WEIXIN_BOT_ALLOW_FROM",
+    "route_tag": "WEIXIN_BOT_ROUTE_TAG",
 }
 
 
