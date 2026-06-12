@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from contextlib import suppress
 
 from weixin_bot.api.client import api_post
 
@@ -17,6 +19,9 @@ CHANNEL_VERSION = "0.1.0"
 # proto TypingStatus
 TYPING = 1
 CANCEL = 2
+
+# keepalive 间隔 — 对齐 nanobot TYPING_KEEPALIVE_INTERVAL_S
+TYPING_KEEPALIVE_INTERVAL_S = 5
 
 
 # ---------------------------------------------------------------------------
@@ -79,3 +84,111 @@ async def send_typing(
         timeout=timeout,
     )
     return json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# TypingIndicator — async context manager with automatic keepalive
+# ---------------------------------------------------------------------------
+
+class TypingIndicator:
+    """打字指示器 — async context manager, 自动 keepalive.
+
+    Usage:
+        async with TypingIndicator(
+            base_url=..., token=..., ilink_user_id=..., context_token=...
+        ) as typing:
+            # 处理消息 (agent 思考/生成回复)
+            # keepalive 自动每 5s 发送一次 TYPING
+            await send_text(...)
+        # 退出时自动发送 CANCEL
+
+    如果 get_config 失败或 typing_ticket 为空, 静默跳过 (不阻塞主流程).
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        ilink_user_id: str,
+        context_token: str = "",
+    ):
+        self._base_url = base_url
+        self._token = token
+        self._user_id = ilink_user_id
+        self._ctx_token = context_token
+        self._ticket: str = ""
+        self._keepalive_task: asyncio.Task | None = None
+        self._stop_event = asyncio.Event()
+
+    async def __aenter__(self) -> "TypingIndicator":
+        # 获取 ticket
+        try:
+            cfg = await get_config(
+                base_url=self._base_url,
+                token=self._token,
+                ilink_user_id=self._user_id,
+                context_token=self._ctx_token,
+            )
+            self._ticket = str(cfg.get("typing_ticket", "") or "")
+        except Exception:
+            logger.debug("TypingIndicator: get_config failed, skipping", exc_info=True)
+            return self
+
+        if not self._ticket:
+            return self
+
+        # 发送 TYPING
+        try:
+            await send_typing(
+                base_url=self._base_url,
+                token=self._token,
+                ilink_user_id=self._user_id,
+                typing_ticket=self._ticket,
+                status=TYPING,
+            )
+        except Exception:
+            logger.debug("TypingIndicator: send_typing(TYPING) failed", exc_info=True)
+            return self
+
+        # 启动 keepalive
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        # 停止 keepalive
+        if self._keepalive_task:
+            self._stop_event.set()
+            self._keepalive_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._keepalive_task
+            self._keepalive_task = None
+
+        # 发送 CANCEL
+        if self._ticket:
+            with suppress(Exception):
+                await send_typing(
+                    base_url=self._base_url,
+                    token=self._token,
+                    ilink_user_id=self._user_id,
+                    typing_ticket=self._ticket,
+                    status=CANCEL,
+                )
+
+    async def _keepalive_loop(self) -> None:
+        """每 5 秒发一次 TYPING, 保持指示器不消失."""
+        try:
+            while not self._stop_event.is_set():
+                await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL_S)
+                if self._stop_event.is_set():
+                    break
+                with suppress(Exception):
+                    await send_typing(
+                        base_url=self._base_url,
+                        token=self._token,
+                        ilink_user_id=self._user_id,
+                        typing_ticket=self._ticket,
+                        status=TYPING,
+                    )
+        finally:
+            pass

@@ -41,7 +41,7 @@ from weixin_bot.media.download import download_media
 from weixin_bot.cdn.upload import upload_image, upload_video, upload_file
 from weixin_bot.messaging.send_media import send_image, send_video, send_file
 from weixin_bot.media.mime import guess_media_type
-from weixin_bot.messaging.typing import get_config, send_typing, TYPING, CANCEL
+from weixin_bot.messaging.typing import get_config, send_typing, TYPING, CANCEL, TypingIndicator
 from weixin_bot.messaging.notices import send_error_notice
 from weixin_bot.config import get as config_get
 
@@ -476,11 +476,15 @@ async def step_monitor(account_id: str, token: str, base_url: str) -> None:
                 )
 
         else:
-            # 默认 echo
-            if m.text:
-                await _reply(m, f"[Echo] {m.text}", base_url, token, ctx)
-            else:
-                await _reply(m, "[Echo] (non-text message)", base_url, token, ctx)
+            # 默认 echo — 演示 TypingIndicator keepalive
+            async with TypingIndicator(
+                base_url=base_url, token=token,
+                ilink_user_id=m.from_user, context_token=ctx,
+            ):
+                if m.text:
+                    await _reply(m, f"[Echo] {m.text}", base_url, token, ctx)
+                else:
+                    await _reply(m, "[Echo] (non-text message)", base_url, token, ctx)
 
     async def _reply(m: "InboundMessage", text: str, base_url: str, token: str, ctx: str) -> None:
         try:
