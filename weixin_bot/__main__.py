@@ -297,6 +297,14 @@ async def step_monitor(account_id: str, token: str, base_url: str) -> None:
         nonlocal msg_count
         msg_count += 1
         m = parse_message(msg)
+
+        # ---- 获取 fresh context_token (自动刷新过期 token) ----
+        ctx = await loop.ctx_tokens.get(
+            user_id=m.from_user, base_url=base_url, auth_token=token,
+        )
+        if not ctx:
+            ctx = m.context_token  # fallback: 用消息里的原始 token
+
         types = []
         if m.text: types.append("text")
         if m.images: types.append(f"image×{len(m.images)}")
@@ -355,7 +363,6 @@ async def step_monitor(account_id: str, token: str, base_url: str) -> None:
 
         # ---- 命令处理 ----
         text = m.text.strip()
-        ctx = m.context_token
 
         if text == "!list":
             files = _list_media()

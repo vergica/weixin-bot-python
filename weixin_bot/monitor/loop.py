@@ -13,6 +13,7 @@ from typing import Callable, Awaitable
 
 from weixin_bot.api.client import api_post
 from weixin_bot.auth.accounts import STATE_DIR as DEFAULT_STATE_DIR
+from weixin_bot.messaging.context_token import ContextTokenCache
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,8 @@ class MonitorLoop:
         self._current_task: asyncio.Task | None = None
         _dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
         self._sync_path = _dir / "accounts" / f"{account_id}.sync.json"
+        # context_token 缓存 — 自动在接收时缓存, 发送前过期刷新
+        self.ctx_tokens = ContextTokenCache()
 
     # ------------------------------------------------------------------
     # public
@@ -106,6 +109,12 @@ class MonitorLoop:
                 timeout = resp["longpolling_timeout_ms"] / 1000
 
             for msg in resp.get("msgs", []) or []:
+                # 缓存 context_token (后续发送前可自动刷新)
+                from_user = msg.get("from_user_id", "") or ""
+                ctx = msg.get("context_token", "") or ""
+                if from_user and ctx:
+                    self.ctx_tokens.cache(from_user, ctx)
+
                 try:
                     await self._on_message(msg)
                 except Exception:
