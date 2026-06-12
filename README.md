@@ -186,23 +186,6 @@ clean = filter_markdown("**bold** *中文斜体* ![img](url)")
 # → "**bold** 中文斜体 "
 ```
 
-## Reliability Features
-
-weixin-bot includes production-ready reliability mechanisms, aligned with the nanobot reference implementation:
-
-| Feature | Description |
-|---|---|
-| context_token auto-refresh | Cached tokens are refreshed via getconfig if >60s old, preventing silent message loss during long agent turns |
-| Response error checking | All send functions validate API `ret`/`errcode` and raise `RuntimeError` on failure |
-| Session auto-recovery | `errcode -14` pauses polling for 1h then resumes automatically — no manual restart needed |
-| Message deduplication | Last 1000 message IDs tracked to prevent duplicate processing from network retransmits |
-| Connection reuse | Persistent `httpx.AsyncClient` with connection pooling for the polling loop |
-| Long message splitting | Messages >4000 chars are automatically split into multiple chunks |
-| Exponential backoff | Consecutive polling failures escalate from 2s → 30s delay |
-| Media download fallback | `full_url` failures (5xx/timeout) gracefully fall back to `encrypt_query_param` |
-| Typing keepalive | `TypingIndicator` context manager keeps the typing indicator alive during agent processing |
-| Access control | Optional `allow_from` whitelist restricts who can interact with the bot |
-
 ## Module Structure
 
 ```
@@ -236,6 +219,13 @@ weixin_bot/
 | File | 4 | ✅ (CDN download + decrypt) | ✅ (upload + send) |
 | Video | 5 | ✅ (CDN download + decrypt) | ✅ (upload + send) |
 | Quoted message | ref_msg | ✅ (parsed into text prefix) | ❌ (protocol unclear) |
+
+## Acknowledgments
+
+This project draws inspiration from:
+
+- [Tencent openclaw-weixin](https://github.com/Tencent/openclaw-weixin) — the original TypeScript implementation of the WeChat iLink bot protocol
+- [HKUDS/nanobot](https://github.com/HKUDS/nanobot) — an ultra-lightweight personal AI agent with reference-quality channel implementations
 
 ## License
 

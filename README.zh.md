@@ -186,23 +186,6 @@ clean = filter_markdown("**粗体** *中文斜体* ![图片](url)")
 # → "**粗体** 中文斜体 "
 ```
 
-## 可靠性机制
-
-参考 nanobot 实现，weixin-bot 内置生产级可靠性保障：
-
-| 机制 | 说明 |
-|---|---|
-| context_token 自动刷新 | 缓存的 token 超过 60 秒自动通过 getconfig 刷新，防止 agent 长时间处理导致回复静默丢失 |
-| 响应错误检查 | 所有 send 函数校验 API 返回的 `ret`/`errcode`，失败时抛出 `RuntimeError` |
-| Session 自动恢复 | `errcode -14` 暂停轮询 1 小时后自动恢复，无需手动重启 |
-| 消息去重 | 维护最近 1000 条 message_id，网络重推时自动跳过 |
-| 连接复用 | 持久化 `httpx.AsyncClient` 连接池，避免每次请求重新握手 |
-| 长消息拆分 | 超过 4000 字自动分段发送 |
-| 退避重试 | 连续失败 ≥3 次退避到 30s，否则 2s 重试 |
-| 媒体下载降级 | `full_url` 失败（5xx/超时）自动降级到 `encrypt_query_param` |
-| 打字 keepalive | `TypingIndicator` 上下文管理器在 agent 处理期间保持"对方正在输入…"状态 |
-| 访问控制 | 可选 `allow_from` 白名单限制可交互用户 |
-
 ## 模块结构
 
 ```
@@ -236,6 +219,13 @@ weixin_bot/
 | 文件 | 4 | ✅（CDN 下载 + 解密） | ✅（上传 + 发送） |
 | 视频 | 5 | ✅（CDN 下载 + 解密） | ✅（上传 + 发送） |
 | 引用消息 | ref_msg | ✅（解析为文本前缀） | ❌（协议未明确） |
+
+## 致谢
+
+本项目灵感来源于：
+
+- [Tencent openclaw-weixin](https://github.com/Tencent/openclaw-weixin) — 微信 iLink 机器人协议的原始 TypeScript 实现
+- [HKUDS/nanobot](https://github.com/HKUDS/nanobot) — 超轻量个人 AI agent，提供了高质量的参考实现
 
 ## 许可证
 
